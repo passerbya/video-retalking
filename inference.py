@@ -75,6 +75,10 @@ def main():
             frame = frame[y1:y2, x1:x2]
             full_frames.append(frame)
 
+    height = full_frames[0].shape[0]
+    args.pads = np.array(args.pads) * max(height//720, 1)
+    #print(args.pads)
+
     print ("[Step 0] Number of frames available for inference: "+str(len(full_frames)))
     # face detection & cropping, cropping the first frame as the style of FFHQ
     croper = Croper('checkpoints/shape_predictor_68_face_landmarks.dat')
@@ -223,6 +227,7 @@ def main():
         instance.initialize()
         instance.setup()
 
+    #ii = 0
     kp_extractor = KeypointExtractor()
     for i, (img_batch, mel_batch, frames, coords, img_original, f_frames) in enumerate(tqdm(gen, desc='[Step 6] Lip Synthesis:', total=int(np.ceil(float(len(mel_chunks)) / args.LNet_batch_size)))):
         img_batch = torch.FloatTensor(np.transpose(img_batch, (0, 3, 1, 2))).to(device)
@@ -267,23 +272,35 @@ def main():
                 ff[y1-yy1: y2-yy1, x1-xx1: x2-xx1] = p
                 out_size = yy2 - yy1
                 # month region enhancement by GFPGAN
-                cropped_faces, restored_faces, restored_img = restorer.enhance(
-                    ff, has_aligned=False, only_center_face=True, paste_back=True)
-                # 0,   1,   2,   3,   4,   5,   6,   7,   8,  9, 10,  11,  12,
-                mm = [0,   0,   0,   0,   0,   0,   0,   0,   0,  0, 255, 255, 255, 0, 0, 0, 255, 255, 0]
+                _, _, restored_img = restorer.enhance(ff, has_aligned=False, only_center_face=True, paste_back=True)
+                '''
+                0: 'background' 1: 'skin'   2: 'nose'
+                3: 'eye_g'  4: 'l_eye'  5: 'r_eye'
+                6: 'l_brow' 7: 'r_brow' 8: 'l_ear'
+                9: 'r_ear'  10: 'mouth' 11: 'u_lip'
+                12: 'l_lip' 13: 'hair'  14: 'hat'
+                15: 'ear_r' 16: 'neck_l'    17: 'neck'
+                18: 'cloth'
+                '''
+                mm = [255,   255,   255,   255,   255,   255,   255,   255,   255,  255, 255, 255, 255, 255, 255, 255, 255, 255, 255]
                 mouse_mask = np.zeros_like(restored_img)
                 enhancer.faceparser.size = out_size
                 tmp_mask = enhancer.faceparser.process(restored_img, mm)[0]
                 mouse_mask= tmp_mask[:, :, np.newaxis] / 255.
-                print(np.array(cropped_faces).shape, np.array(restored_faces).shape, np.array(restored_img).shape)
-
                 full_mask = np.float32(mouse_mask)
+                '''
+                cv2.imwrite(f"face/{ii:05d}_p.jpg", p)
+                cv2.imwrite(f"face/{ii:05d}_ff.jpg", ff)
+                cv2.imwrite(f"face/{ii:05d}_restored_img.jpg", restored_img)
+                cv2.imwrite(f"false/{ii:05d}_full_mask.jpg", full_mask*255)
+                '''
                 print(np.array(restored_img).shape, np.array(ff).shape, np.array(full_mask[:, :, 0]).shape)
-                img = Laplacian_Pyramid_Blending_with_mask(restored_img, ff, full_mask[:, :, 0], 1)
+                img = Laplacian_Pyramid_Blending_with_mask(restored_img, ff, full_mask[:, :, 0], 10)
                 pp = np.uint8(np.clip(img, 0 ,255))
+                #cv2.imwrite(f"face/{ii:05d}_pp1.jpg", pp)
                 xf[yy1: yy2, xx1: xx2] = pp
-                pp, orig_faces, enhanced_faces = enhancer.process(pp, xf, bbox=c, face_enhance=True, possion_blending=True)
-                out.write(pp)
+                out.write(xf)
+                #ii += 1
     out.release()
     
     if not os.path.isdir(os.path.dirname(args.outfile)):

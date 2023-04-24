@@ -128,14 +128,15 @@ def face_detect(images, args, jaw_correction=False, detector=None):
     pady1, pady2, padx1, padx2 = args.pads if jaw_correction else (0,20,0,0)
     for rect, image in zip(predictions, images):
         if rect is None:
-            cv2.imwrite('temp/faulty_frame.jpg', image) # check this frame where the face was not detected.
-            raise ValueError('Face not detected! Ensure the video contains a face in all the frames.')
-
-        y1 = max(0, rect[1] - pady1)
-        y2 = min(image.shape[0], rect[3] + pady2)
-        x1 = max(0, rect[0] - padx1)
-        x2 = min(image.shape[1], rect[2] + padx2)
-        results.append([x1, y1, x2, y2])
+            #cv2.imwrite('temp/faulty_frame.jpg', image) # check this frame where the face was not detected.
+            #raise ValueError('Face not detected! Ensure the video contains a face in all the frames.')
+            results.append([0, 0, 0, 0])
+        else:
+            y1 = max(0, rect[1] - pady1)
+            y2 = min(image.shape[0], rect[3] + pady2)
+            x1 = max(0, rect[0] - padx1)
+            x2 = min(image.shape[1], rect[2] + padx2)
+            results.append([x1, y1, x2, y2])
 
     boxes = np.array(results)
     if not args.nosmooth: boxes = get_smoothened_boxes(boxes, T=5)
@@ -218,6 +219,35 @@ def Laplacian_Pyramid_Blending_with_mask(A, B, m, num_levels = 6):
         ls_ = cv2.pyrUp(ls_)
         ls_ = cv2.add(ls_, LS[i])
     return ls_
+
+def merge_face(f, c):
+    y1, y2, x1, x2 = c
+    w = x2 - x1
+    h = y2 - y1
+
+    pad = 512
+    while pad < w:
+        pad = pad * 2
+    while pad < h:
+        pad = pad * 2
+    h_pad = int((pad - h) / 2)
+    w_pad = int((pad - w) / 2)
+    height, width = f.shape[:2]
+    offset_top = 0
+    offset_bottom = 0
+    offset_left = 0
+    offset_right = 0
+    if y1-h_pad < 0:
+        offset_top = h_pad-y1
+    if y2+h_pad > height:
+        offset_bottom = y2+h_pad-height
+    if x1-w_pad < 0:
+        offset_left = w_pad-x1
+    if x2+w_pad > width:
+        offset_right = x2+w_pad-width
+
+    b = (y1-h_pad+offset_top-offset_bottom, y2+h_pad+offset_top-offset_bottom+((pad - h) % 2), x1-w_pad+offset_left-offset_right, x2+w_pad+offset_left-offset_right+((pad - w) % 2))
+    return b
 
 def load_model(args, device):
     D_Net = load_DNet(args).to(device)

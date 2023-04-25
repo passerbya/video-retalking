@@ -25,7 +25,7 @@ def options():
     parser.add_argument('--outfile', type=str, help='Video path to save result')
 
     parser.add_argument('--fps', type=float, help='Can be specified only if input is a static image (default: 25)', default=25., required=False)
-    parser.add_argument('--pads', nargs='+', type=int, default=[0, 20, 0, 0], help='Padding (top, bottom, left, right). Please adjust to include chin at least')
+    parser.add_argument('--pads', nargs='+', type=int, default=[0, 30, 0, 0], help='Padding (top, bottom, left, right). Please adjust to include chin at least')
     parser.add_argument('--face_det_batch_size', type=int, help='Batch size for face detection', default=4)
     parser.add_argument('--LNet_batch_size', type=int, help='Batch size for LNet', default=16)
     parser.add_argument('--img_size', type=int, default=384)

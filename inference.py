@@ -270,7 +270,6 @@ def main():
                 yy1, yy2, xx1, xx2 = merge_face(xf, c)
                 ff = xf.copy()[yy1: yy2, xx1: xx2]
                 ff[y1-yy1: y2-yy1, x1-xx1: x2-xx1] = p
-                out_size = yy2 - yy1
                 # month region enhancement by GFPGAN
                 _, _, restored_img = restorer.enhance(ff, has_aligned=False, only_center_face=True, paste_back=True)
                 '''
@@ -282,24 +281,25 @@ def main():
                 15: 'ear_r' 16: 'neck_l'    17: 'neck'
                 18: 'cloth'
                 '''
-                mm = [255,   255,   255,   255,   255,   255,   255,   255,   255,  255, 255, 255, 255, 255, 255, 255, 255, 255, 255]
+                mm = [255, 255, 255, 255, 255, 255,255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255]
                 mouse_mask = np.zeros_like(restored_img)
-                enhancer.faceparser.size = out_size
-                tmp_mask = enhancer.faceparser.process(restored_img, mm)[0]
-                mouse_mask= tmp_mask[:, :, np.newaxis] / 255.
+                enhancer.faceparser.size = yy2 - yy1
+                tmp_mask = enhancer.faceparser.process(restored_img[y1-yy1: y2-yy1, x1-xx1: x2-xx1], mm)[0]
+                mouse_mask[y1-yy1: y2-yy1, x1-xx1: x2-xx1] = cv2.resize(tmp_mask, (x2 - x1, y2 - y1))[:, :, np.newaxis] / 255.
                 full_mask = np.float32(mouse_mask)
                 cv2.imwrite(f"face/{ii:05d}_p.jpg", p)
                 cv2.imwrite(f"face/{ii:05d}_ff.jpg", ff)
                 cv2.imwrite(f"face/{ii:05d}_restored_img.jpg", restored_img)
                 cv2.imwrite(f"false/{ii:05d}_full_mask.jpg", full_mask*255)
-                print(np.array(restored_img).shape, np.array(ff).shape, np.array(full_mask[:, :, 0]).shape)
                 img = Laplacian_Pyramid_Blending_with_mask(restored_img, ff, full_mask[:, :, 0], 10)
                 pp = np.uint8(np.clip(img, 0 ,255))
-                xf[yy1: yy2, xx1: xx2] = pp
                 cv2.imwrite(f"face/{ii:05d}_pp1.jpg", pp)
-                #face_box = (y1-yy1, y2-yy1, x1-xx1, x2-xx1)
-                #pp, orig_faces, enhanced_faces = enhancer.process(pp, ff, bbox=face_box, face_enhance=False, possion_blending=True)
-                #cv2.imwrite(f"face/{ii:05d}_pp2.jpg", pp)
+                pf = xf.copy()
+                pf[yy1: yy2, xx1: xx2] = pp
+                pp, orig_faces, enhanced_faces = enhancer.process(pf, xf, bbox=c, face_enhance=True, possion_blending=True)
+                cv2.imwrite(f"face/{ii:05d}_pp2.jpg", pp)
+                xf[yy1: yy2, xx1: xx2] = pp[yy1: yy2, xx1: xx2]
+                cv2.imwrite(f"face/{ii:05d}_xf.jpg", xf)
                 out.write(xf)
                 ii += 1
     out.release()

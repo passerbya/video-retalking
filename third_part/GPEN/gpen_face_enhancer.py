@@ -117,6 +117,9 @@ class FaceEnhancement(object):
 
         full_mask = full_mask[:, :, np.newaxis]
         mask_sharp = mask_sharp[:, :, np.newaxis]
+        aligned_size = 512
+        while aligned_size < min(2048, max(width, height)):
+            aligned_size = aligned_size * 2
 
         if self.use_sr and img_sr is not None:
             img = cv2.convertScaleAbs(img_sr*(1-full_mask) + full_img*full_mask)
@@ -126,9 +129,9 @@ class FaceEnhancement(object):
                 y1, y2, x1, x2 = bbox
                 mask_bbox = np.zeros_like(mask_sharp)
                 mask_bbox[y1:y2 - 5, x1:x2] = 1
-                full_img, ori_img, full_mask = [cv2.resize(x,(512,512)) for x in (full_img, ori_img, np.float32(mask_sharp * mask_bbox))]
+                full_img, ori_img, full_mask = [cv2.resize(x,(aligned_size,aligned_size)) for x in (full_img, ori_img, np.float32(mask_sharp * mask_bbox))]
             else:
-                full_img, ori_img, full_mask = [cv2.resize(x,(512,512)) for x in (full_img, ori_img, full_mask)]
+                full_img, ori_img, full_mask = [cv2.resize(x,(aligned_size,aligned_size)) for x in (full_img, ori_img, full_mask)]
             
             img = Laplacian_Pyramid_Blending_with_mask(full_img, ori_img, full_mask, 6)
             img = np.clip(img, 0 ,255)

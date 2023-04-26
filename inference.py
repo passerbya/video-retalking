@@ -75,6 +75,10 @@ def main():
             frame = frame[y1:y2, x1:x2]
             full_frames.append(frame)
 
+    height = full_frames[0].shape[0]
+    args.pads = np.array(args.pads) * max(height//480, 1)
+    print(args.pads)
+
     print ("[Step 0] Number of frames available for inference: "+str(len(full_frames)))
     # face detection & cropping, cropping the first frame as the style of FFHQ
     croper = Croper('checkpoints/shape_predictor_68_face_landmarks.dat')
@@ -292,7 +296,7 @@ def main():
                 cv2.imwrite(f"face/{ii:05d}_pp1.jpg", pp)
                 pf = xf.copy()
                 pf[yy1: yy2, xx1: xx2] = pp
-                pp, orig_faces, enhanced_faces = enhancer.process(pf, xf, bbox=c, face_enhance=True, possion_blending=True)
+                pp, orig_faces, enhanced_faces = enhancer.process(pf, xf, bbox=c, face_enhance=False, possion_blending=True)
                 cv2.imwrite(f"face/{ii:05d}_pp2.jpg", pp)
                 xf[yy1: yy2, xx1: xx2] = pp[yy1: yy2, xx1: xx2]
                 cv2.imwrite(f"face/{ii:05d}_xf.jpg", xf)

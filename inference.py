@@ -75,10 +75,6 @@ def main():
             frame = frame[y1:y2, x1:x2]
             full_frames.append(frame)
 
-    height = full_frames[0].shape[0]
-    args.pads = np.array(args.pads) * max(height//480, 1)
-    print(args.pads)
-
     print ("[Step 0] Number of frames available for inference: "+str(len(full_frames)))
     # face detection & cropping, cropping the first frame as the style of FFHQ
     croper = Croper('checkpoints/shape_predictor_68_face_landmarks.dat')

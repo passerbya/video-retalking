@@ -73,6 +73,8 @@ def crop_image(filepath, output_size, quad, enable_padding=False):
         img = filepath
     else:
         img = PIL.Image.open(filepath)
+    if np.isnan(qsize):
+        return img
     transform_size = output_size
     # Shrink.
     shrink = int(np.floor(qsize / output_size * 0.5))

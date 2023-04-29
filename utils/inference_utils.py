@@ -232,20 +232,26 @@ def merge_face(f, c):
     h_pad = int((pad - h) / 2)
     w_pad = int((pad - w) / 2)
     height, width = f.shape[:2]
-    offset_top = 0
-    offset_bottom = 0
-    offset_left = 0
-    offset_right = 0
-    if y1-h_pad < 0:
-        offset_top = h_pad-y1
-    if y2+h_pad > height:
-        offset_bottom = y2+h_pad-height
-    if x1-w_pad < 0:
-        offset_left = w_pad-x1
-    if x2+w_pad > width:
-        offset_right = x2+w_pad-width
 
-    b = (y1-h_pad+offset_top-offset_bottom, y2+h_pad+offset_top-offset_bottom+((pad - h) % 2), x1-w_pad+offset_left-offset_right, x2+w_pad+offset_left-offset_right+((pad - w) % 2))
+    yy1 = y1 - h_pad
+    if yy1 < 0:
+        yy1 = 0
+    yy2 = yy1 + pad
+    if yy2 > height:
+        yy2 = height
+        yy1 = height - pad
+
+    xx1 = x1 - w_pad
+    if xx1 < 0:
+        xx1 = 0
+    xx2 = xx1 + pad
+    if xx2 > width:
+        xx2 = width
+        xx1 = width - pad
+
+    #print(y1, y2, h, h_pad, yy1, yy2)
+    #print(x1, x2, w, w_pad, xx1, xx2)
+    b = (yy1, yy2, xx1, xx2)
     return b
 
 def load_model(args, device):

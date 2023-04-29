@@ -23,6 +23,7 @@ from utils.inference_utils import Laplacian_Pyramid_Blending_with_mask, merge_fa
 import warnings
 warnings.filterwarnings("ignore")
 import hashlib
+import shutil
 
 args = options()
 
@@ -44,77 +45,55 @@ def md5sum(f):
 def main():
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     print('[Info] Using {} for inference.'.format(device))
-    os.makedirs(args.tmp_dir, exist_ok=True)
-
-    enhancer = FaceEnhancement(base_dir='checkpoints', size=512, model='GPEN-BFR-512', use_sr=False, \
-                               sr_model='rrdb_realesrnet_psnr', channel_multiplier=2, narrow=1, device=device)
-    restorer = GFPGANer(model_path='checkpoints/GFPGANv1.4.pth', upscale=1)
 
     if os.path.isfile(args.face) and args.face.split('.')[1] in ['jpg', 'png', 'jpeg']:
         args.static = True
     if not os.path.isfile(args.face):
         raise ValueError('--face argument must be a valid path to video/image file')
-    elif args.face.split('.')[1] in ['jpg', 'png', 'jpeg']:
-        full_frames = [cv2.imread(args.face)]
+
+    base_name = md5sum(args.face)
+    tmp_dir = '{}/{}'.format(args.tmp_dir, base_name)
+    os.makedirs(tmp_dir, exist_ok=True)
+    temp_audio = '{}/temp.wav'.format(tmp_dir)
+    if not args.audio.endswith('.wav'):
+        command = 'ffmpeg -loglevel error -y -i {} -strict -2 {}'.format(args.audio, temp_audio)
+        subprocess.call(command, shell=True)
+        args.audio = temp_audio
+    wav = audio.load_wav(args.audio, 16000)
+    mel = audio.melspectrogram(wav)
+    if np.isnan(mel.reshape(-1)).sum() > 0:
+        if os.path.exists(tmp_dir):
+            shutil.rmtree(tmp_dir)
+
+        raise ValueError('Mel contains nan! Using a TTS voice? Add a small epsilon noise to the wav file and try again')
+
+    if args.face.split('.')[1] in ['jpg', 'png', 'jpeg']:
         fps = args.fps
-        lipsync(args, device, enhancer, restorer, fps, full_frames)
     else:
         video_stream = cv2.VideoCapture(args.face)
         fps = video_stream.get(cv2.CAP_PROP_FPS)
-        frames = frameread(args, video_stream)
-        for full_frames in frames:
-            lipsync(args, device, enhancer, restorer, fps, full_frames)
+        _, frame = video_stream.read()
+        height, width = frame.shape[:-1]
         video_stream.release()
 
-def lipsync(args, device, enhancer, restorer, fps, full_frames):
-    frame_h, frame_w = full_frames[0].shape[:-1]
-    if not isinstance(args.pads, np.ndarray):
-        args.pads = np.int32(np.array(args.pads) * max(frame_h/480, 1))
-        print(args.pads)
+    mel_step_size, mel_idx_multiplier, i, mel_chunks = 16, 80./fps, 0, []
+    while True:
+        start_idx = int(i * mel_idx_multiplier)
+        if start_idx + mel_step_size > len(mel[0]):
+            mel_chunks.append(mel[:, len(mel[0]) - mel_step_size:])
+            break
+        mel_chunks.append(mel[:, start_idx : start_idx + mel_step_size])
+        i += 1
 
-    print ("[Step 0] Number of frames available for inference: "+str(len(full_frames)))
-    # face detection & cropping, cropping the first frame as the style of FFHQ
+    print("Load audio; Length of mel chunks: {}".format(len(mel_chunks)))
+
+    global enhancer, restorer, croper, net_recon, lm3d_std, expression, D_Net, model
+    enhancer = FaceEnhancement(base_dir='checkpoints', size=512, model='GPEN-BFR-512', use_sr=False, \
+                               sr_model='rrdb_realesrnet_psnr', channel_multiplier=2, narrow=1, device=device)
+    restorer = GFPGANer(model_path='checkpoints/GFPGANv1.4.pth', upscale=1)
     croper = Croper('checkpoints/shape_predictor_68_face_landmarks.dat')
-    full_frames_RGB = [cv2.cvtColor(frame, cv2.COLOR_BGR2RGB) for frame in full_frames]
-    full_frames_RGB, crop, quad = croper.crop(full_frames_RGB, xsize=512)
-
-    clx, cly, crx, cry = crop
-    lx, ly, rx, ry = quad
-    lx, ly, rx, ry = int(lx), int(ly), int(rx), int(ry)
-    oy1, oy2, ox1, ox2 = cly+ly, min(cly+ry, frame_h), clx+lx, min(clx+rx, frame_w)
-    # original_size = (ox2 - ox1, oy2 - oy1)
-    frames_pil = [Image.fromarray(cv2.resize(frame,(256,256))) for frame in full_frames_RGB]
-
-    # get the landmark according to the detected face.
-    print('[Step 1] Landmarks Extraction in Video.')
-    kp_extractor = KeypointExtractor()
-    lm = kp_extractor.extract_keypoint(frames_pil)
-
     net_recon = load_face3d_net(args.face3d_net_path, device)
     lm3d_std = load_lm3d('checkpoints/BFM')
-
-    video_coeffs = []
-    for idx in tqdm(range(len(frames_pil)), desc="[Step 2] 3DMM Extraction In Video:"):
-        frame = frames_pil[idx]
-        W, H = frame.size
-        lm_idx = lm[idx].reshape([-1, 2])
-        if np.mean(lm_idx) == -1:
-            lm_idx = (lm3d_std[:, :2]+1) / 2.
-            lm_idx = np.concatenate([lm_idx[:, :1] * W, lm_idx[:, 1:2] * H], 1)
-        else:
-            lm_idx[:, -1] = H - 1 - lm_idx[:, -1]
-
-        trans_params, im_idx, lm_idx, _ = align_img(frame, lm_idx, lm3d_std)
-        trans_params = np.array([float(item) for item in np.hsplit(trans_params, 5)]).astype(np.float32)
-        im_idx_tensor = torch.tensor(np.array(im_idx)/255., dtype=torch.float32).permute(2, 0, 1).to(device).unsqueeze(0)
-        with torch.no_grad():
-            coeffs = split_coeff(net_recon(im_idx_tensor))
-
-        pred_coeff = {key:coeffs[key].cpu().numpy() for key in coeffs}
-        pred_coeff = np.concatenate([pred_coeff['id'], pred_coeff['exp'], pred_coeff['tex'], pred_coeff['angle'], \
-                                     pred_coeff['gamma'], pred_coeff['trans'], trans_params[None]], 1)
-        video_coeffs.append(pred_coeff)
-    semantic_npy = np.array(video_coeffs)[:,0]
 
     # generate the 3dmm coeff from a single image
     if args.exp_img is not None and ('.png' in args.exp_img or '.jpg' in args.exp_img):
@@ -147,6 +126,83 @@ def lipsync(args, device, enhancer, restorer, fps, full_frames):
     # load DNet, model(LNet and ENet)
     D_Net, model = load_model(args, device)
 
+    print("Load modell done.")
+
+    if args.face.split('.')[1] in ['jpg', 'png', 'jpeg']:
+        full_frames = [cv2.imread(args.face)]
+        height, width = full_frames[0].shape[:-1]
+        temp_video = '{}/result.mp4'.format(tmp_dir)
+        out = cv2.VideoWriter(temp_video, cv2.VideoWriter_fourcc(*'mp4v'), fps, (width, height))
+        lipsync(out, args, device, fps, mel_chunks, full_frames)
+    else:
+        video_stream = cv2.VideoCapture(args.face)
+        args.pads = np.int32(np.array(args.pads) * max(height/480, 1))
+        frames = frameread(args, video_stream)
+        temp_video = '{}/result.mp4'.format(tmp_dir)
+        out = cv2.VideoWriter(temp_video, cv2.VideoWriter_fourcc(*'mp4v'), fps, (width, height))
+        for full_frames in frames:
+            lipsync(out, args, device, fps, mel_chunks, full_frames)
+        video_stream.release()
+
+    out.release()
+
+    if not os.path.isdir(os.path.dirname(args.outfile)):
+        os.makedirs(os.path.dirname(args.outfile), exist_ok=True)
+    command = 'ffmpeg -loglevel error -y -i {} -i {} -strict -2 -q:v 1 {}'.format(args.audio, temp_video, args.outfile)
+    subprocess.call(command, shell=platform.system() != 'Windows')
+    if os.path.exists(tmp_dir):
+        shutil.rmtree(tmp_dir)
+    print('outfile:', args.outfile)
+
+def lipsync(out, args, device, fps, mel_chunks, full_frames):
+    global enhancer, restorer, croper, net_recon, lm3d_std, expression, D_Net, model
+    frame_h, frame_w = full_frames[0].shape[:-1]
+    print ("[Step 0] Number of frames available for inference: "+str(len(full_frames)))
+    # face detection & cropping, cropping the first frame as the style of FFHQ
+    full_frames_RGB = [cv2.cvtColor(frame, cv2.COLOR_BGR2RGB) for frame in full_frames]
+    crop_result = croper.crop(full_frames_RGB, xsize=512)
+    if crop_result is None:
+        #no face
+        for frame in full_frames:
+            out.write(frame)
+        return
+    full_frames_RGB, crop, quad = crop_result
+
+    clx, cly, crx, cry = crop
+    lx, ly, rx, ry = quad
+    lx, ly, rx, ry = int(lx), int(ly), int(rx), int(ry)
+    oy1, oy2, ox1, ox2 = cly+ly, min(cly+ry, frame_h), clx+lx, min(clx+rx, frame_w)
+    # original_size = (ox2 - ox1, oy2 - oy1)
+    frames_pil = [Image.fromarray(cv2.resize(frame,(256,256))) for frame in full_frames_RGB]
+
+    # get the landmark according to the detected face.
+    print('[Step 1] Landmarks Extraction in Video.')
+    kp_extractor = KeypointExtractor()
+    lm = kp_extractor.extract_keypoint(frames_pil)
+
+    video_coeffs = []
+    for idx in tqdm(range(len(frames_pil)), desc="[Step 2] 3DMM Extraction In Video:"):
+        frame = frames_pil[idx]
+        W, H = frame.size
+        lm_idx = lm[idx].reshape([-1, 2])
+        if np.mean(lm_idx) == -1:
+            lm_idx = (lm3d_std[:, :2]+1) / 2.
+            lm_idx = np.concatenate([lm_idx[:, :1] * W, lm_idx[:, 1:2] * H], 1)
+        else:
+            lm_idx[:, -1] = H - 1 - lm_idx[:, -1]
+
+        trans_params, im_idx, lm_idx, _ = align_img(frame, lm_idx, lm3d_std)
+        trans_params = np.array([float(item) for item in np.hsplit(trans_params, 5)]).astype(np.float32)
+        im_idx_tensor = torch.tensor(np.array(im_idx)/255., dtype=torch.float32).permute(2, 0, 1).to(device).unsqueeze(0)
+        with torch.no_grad():
+            coeffs = split_coeff(net_recon(im_idx_tensor))
+
+        pred_coeff = {key:coeffs[key].cpu().numpy() for key in coeffs}
+        pred_coeff = np.concatenate([pred_coeff['id'], pred_coeff['exp'], pred_coeff['tex'], pred_coeff['angle'], \
+                                     pred_coeff['gamma'], pred_coeff['trans'], trans_params[None]], 1)
+        video_coeffs.append(pred_coeff)
+    semantic_npy = np.array(video_coeffs)[:,0]
+
     imgs = []
     for idx in tqdm(range(len(frames_pil)), desc="[Step 3] Stablize the expression In Video:"):
         if args.one_shot:
@@ -164,34 +220,16 @@ def lipsync(args, device, enhancer, restorer, fps, full_frames):
             output = D_Net(source_img, coeff)
         img_stablized = np.uint8((output['fake_image'].squeeze(0).permute(1,2,0).cpu().clamp_(-1, 1).numpy() + 1 )/2. * 255)
         imgs.append(cv2.cvtColor(img_stablized,cv2.COLOR_RGB2BGR))
-    del D_Net
     torch.cuda.empty_cache()
 
-    base_name = md5sum(args.face)
-    os.makedirs('{}/{}'.format(args.tmp_dir, base_name), exist_ok=True)
-    temp_audio = '{}/{}/temp.wav'.format(args.tmp_dir, base_name)
-    if not args.audio.endswith('.wav'):
-        command = 'ffmpeg -loglevel error -y -i {} -strict -2 {}'.format(args.audio, temp_audio)
-        subprocess.call(command, shell=True)
-        args.audio = temp_audio
-    wav = audio.load_wav(args.audio, 16000)
-    mel = audio.melspectrogram(wav)
-    if np.isnan(mel.reshape(-1)).sum() > 0:
-        raise ValueError('Mel contains nan! Using a TTS voice? Add a small epsilon noise to the wav file and try again')
-
-    mel_step_size, mel_idx_multiplier, i, mel_chunks = 16, 80./fps, 0, []
-    while True:
-        start_idx = int(i * mel_idx_multiplier)
-        if start_idx + mel_step_size > len(mel[0]):
-            mel_chunks.append(mel[:, len(mel[0]) - mel_step_size:])
-            break
-        mel_chunks.append(mel[:, start_idx : start_idx + mel_step_size])
-        i += 1
-
-    print("[Step 4] Load audio; Length of mel chunks: {}".format(len(mel_chunks)))
-    imgs = imgs[:len(mel_chunks)]
-    full_frames = full_frames[:len(mel_chunks)]
-    lm = lm[:len(mel_chunks)]
+    if len(mel_chunks) >= len(imgs):
+        mel_batch = mel_chunks[:len(imgs)]
+        del mel_chunks[:len(imgs)]
+    else:
+        mel_batch = mel_chunks
+        imgs = imgs[:len(mel_chunks)]
+        full_frames = full_frames[:len(mel_chunks)]
+        lm = lm[:len(mel_chunks)]
 
     imgs_enhanced = []
     for idx in tqdm(range(len(imgs)), desc='[Step 5] Reference Enhancement'):
@@ -200,18 +238,17 @@ def lipsync(args, device, enhancer, restorer, fps, full_frames):
             pred, _, _ = enhancer.process(img, img, face_enhance=True, possion_blending=False)
             imgs_enhanced.append(pred)
         except UnboundLocalError:
-            #没有头像
+            #no face
             imgs_enhanced.append(img)
-    gen = datagen(imgs_enhanced.copy(), mel_chunks, full_frames, None, (oy1,oy2,ox1,ox2))
-    temp_video = '{}/{}/result.mp4'.format(args.tmp_dir, base_name)
-    out = cv2.VideoWriter(temp_video, cv2.VideoWriter_fourcc(*'mp4v'), fps, (frame_w, frame_h))
+    print(len(mel_chunks), len(imgs_enhanced), len(mel_batch), len(full_frames))
+    gen = datagen(imgs_enhanced.copy(), mel_batch, full_frames, None, (oy1,oy2,ox1,ox2))
 
     if args.up_face != 'original':
         instance = GANimationModel()
         instance.initialize()
         instance.setup()
 
-    ii = 0
+    #ii = 0
     kp_extractor = KeypointExtractor()
     for i, (img_batch, mel_batch, frames, coords, img_original, f_frames) in enumerate(tqdm(gen, desc='[Step 6] Lip Synthesis:', total=int(np.ceil(float(len(mel_chunks)) / args.LNet_batch_size)))):
         img_batch = torch.FloatTensor(np.transpose(img_batch, (0, 3, 1, 2))).to(device)
@@ -246,7 +283,6 @@ def lipsync(args, device, enhancer, restorer, fps, full_frames):
 
         torch.cuda.empty_cache()
         for p, f, xf, c in zip(pred, frames, f_frames, coords):
-            print(c)
             if c[0]==0 and c[1]==0 and c[2]==0 and c[3]==0:
                 out.write(xf)
             else:
@@ -277,32 +313,23 @@ def lipsync(args, device, enhancer, restorer, fps, full_frames):
                 cv2.imwrite(f"face/{ii:05d}_ff.jpg", ff)
                 cv2.imwrite(f"face/{ii:05d}_restored_img.jpg", restored_img)
                 '''
+                #print(np.shape(restored_img), np.shape(ff), np.shape(full_mask[:, :, 0]))
                 img = Laplacian_Pyramid_Blending_with_mask(restored_img, ff, full_mask[:, :, 0], 10)
                 pp = np.uint8(np.clip(img, 0 ,255))
-                cv2.imwrite(f"face/{ii:05d}_pp1.jpg", pp)
+                #cv2.imwrite(f"face/{ii:05d}_pp1.jpg", pp)
                 pf = xf.copy()
                 pf[yy1: yy2, xx1: xx2] = pp
                 try:
                     pp, orig_faces, enhanced_faces = enhancer.process(pf, xf, bbox=c, face_enhance=False, possion_blending=True)
                     #cv2.imwrite(f"face/{ii:05d}_pp2.jpg", pp)
                     xf[yy1: yy2, xx1: xx2] = pp[yy1: yy2, xx1: xx2]
-                    cv2.imwrite(f"face/{ii:05d}_xf.jpg", xf)
+                    #cv2.imwrite(f"face/{ii:05d}_xf.jpg", xf)
                     out.write(xf)
                 except UnboundLocalError:
-                    #没有头像
+                    #no face
                     out.write(xf)
-                ii += 1
-    out.release()
+                #ii += 1
 
-    if not os.path.isdir(os.path.dirname(args.outfile)):
-        os.makedirs(os.path.dirname(args.outfile), exist_ok=True)
-    command = 'ffmpeg -loglevel error -y -i {} -i {} -strict -2 -q:v 1 {}'.format(args.audio, temp_video, args.outfile)
-    subprocess.call(command, shell=platform.system() != 'Windows')
-    if os.path.exists(temp_audio):
-        os.remove(temp_audio)
-    if os.path.exists(temp_video):
-        os.remove(temp_video)
-    print('outfile:', args.outfile)
 
 def frameread(args, video_stream):
     full_frames = []
@@ -324,8 +351,6 @@ def frameread(args, video_stream):
 # frames:256x256, full_frames: original size
 def datagen(frames, mels, full_frames, frames_pil, cox):
     img_batch, mel_batch, frame_batch, coords_batch, ref_batch, full_frame_batch = [], [], [], [], [], []
-    base_name = args.face.split('/')[-1]
-    base_name = md5sum(args.face)
     refs = []
     image_size = 256 
 
@@ -357,9 +382,13 @@ def datagen(frames, mels, full_frames, frames_pil, cox):
         face = refs[idx]
         oface, coords = face_det_results[idx].copy()
 
+        if oface.shape[0] == 0 and oface.shape[1] == 0:
+            #print('oface', coords, oface, np.shape(full_frames[idx]))
+            coords = [0, 0, 0, 0]
+
         if coords[0]==0 and coords[1]==0 and coords[2]==0 and coords[3]==0:
-            face = frame_to_save[0:args.img_size, 0:args.img_size]
-            oface = frame_to_save[0:args.img_size, 0:args.img_size]
+            face = full_frames[idx][0:args.img_size, 0:args.img_size]
+            oface = full_frames[idx][0:args.img_size, 0:args.img_size]
         else:
             face = cv2.resize(face, (args.img_size, args.img_size))
             oface = cv2.resize(oface, (args.img_size, args.img_size))
@@ -391,6 +420,13 @@ def datagen(frames, mels, full_frames, frames_pil, cox):
         mel_batch = np.reshape(mel_batch, [len(mel_batch), mel_batch.shape[1], mel_batch.shape[2], 1])
         yield img_batch, mel_batch, frame_batch, coords_batch, img_original, full_frame_batch
 
-
+enhancer = None
+restorer = None
+croper = None
+net_recon = None
+lm3d_std = None
+expression = None
+D_Net = None
+model = None
 if __name__ == '__main__':
     main()

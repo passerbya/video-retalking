@@ -12,6 +12,7 @@ from third_part.face3d.extract_kp_videos import KeypointExtractor
 # face enhancement
 from third_part.GPEN.gpen_face_enhancer import FaceEnhancement
 from third_part.GFPGAN.gfpgan import GFPGANer
+from third_part.GPEN.face_detect.retinaface_detection import RetinaFaceDetection
 # expression control
 from third_part.ganimation_replicate.model.ganimation import GANimationModel
 
@@ -116,7 +117,6 @@ def main():
         im_exp_tensor = torch.tensor(np.array(im_exp)/255., dtype=torch.float32).permute(2, 0, 1).to(device).unsqueeze(0)
         with torch.no_grad():
             expression = split_coeff(net_recon(im_exp_tensor))['exp'][0]
-        del net_recon
     elif args.exp_img == 'smile':
         expression = torch.tensor(loadmat('checkpoints/expression.mat')['expression_mouth'])[0]
     else:
@@ -126,7 +126,7 @@ def main():
     # load DNet, model(LNet and ENet)
     D_Net, model = load_model(args, device)
 
-    print("Load modell done.")
+    print("Load model done.")
 
     if args.face.split('.')[1] in ['jpg', 'png', 'jpeg']:
         full_frames = [cv2.imread(args.face)]
@@ -137,11 +137,59 @@ def main():
     else:
         video_stream = cv2.VideoCapture(args.face)
         args.pads = np.int32(np.array(args.pads) * max(height/480, 1))
-        frames = frameread(args, video_stream)
+
+        facedetector = RetinaFaceDetection('checkpoints', device)
         temp_video = '{}/result.mp4'.format(tmp_dir)
         out = cv2.VideoWriter(temp_video, cv2.VideoWriter_fourcc(*'mp4v'), fps, (width, height))
-        for full_frames in frames:
-            lipsync(out, args, device, fps, mel_chunks, full_frames)
+        index = 0
+
+        while True:
+            frames = read_frames(video_stream, args.frame_batch_size)
+            if len(frames) == 0:
+                break
+
+            _face_indexes = []
+            _full_frames = []
+            _mel_batch = []
+            for idx in range(len(frames)):
+                img_512 = np.array(cv2.resize(frames[idx],(512,512)))
+                facebs, landms = facedetector.detect(img_512)
+                #print(len(facebs), len(landms))
+
+                if len(facebs) == 0 and len(landms) == 0:
+                    #no face
+                    if len(_face_indexes) == 0 or _face_indexes[-1]:
+                        _face_indexes.append(False)
+                        _full_frames.append([])
+                        _mel_batch.append([])
+                else:
+                    if len(_face_indexes) == 0 or not _face_indexes[-1]:
+                        _face_indexes.append(True)
+                        _full_frames.append([])
+                        _mel_batch.append([])
+
+                _full_frames[-1].append(frames[idx])
+                if index < len(mel_chunks):
+                    _mel_batch[-1].append(mel_chunks[index])
+                index += 1
+
+            for idx in range(len(_face_indexes)):
+                full_frames = _full_frames[idx]
+                mel_batch = _mel_batch[idx]
+
+                if not _face_indexes[idx]:
+                    print(len(full_frames), 'frames has no face')
+                    for frame in full_frames:
+                        out.write(frame)
+                else:
+                    if len(full_frames) < 2:
+                        print('1 frame has face')
+                        for frame in full_frames:
+                            out.write(frame)
+                    else:
+                        print(len(full_frames), 'frames has face')
+                        lipsync(out, args, device, fps, mel_batch, full_frames)
+
         video_stream.release()
 
     out.release()
@@ -163,6 +211,7 @@ def lipsync(out, args, device, fps, mel_chunks, full_frames):
     crop_result = croper.crop(full_frames_RGB, xsize=512)
     if crop_result is None:
         #no face
+        print(len(full_frames), 'frames has no face')
         for frame in full_frames:
             out.write(frame)
         return
@@ -222,35 +271,26 @@ def lipsync(out, args, device, fps, mel_chunks, full_frames):
         imgs.append(cv2.cvtColor(img_stablized,cv2.COLOR_RGB2BGR))
     torch.cuda.empty_cache()
 
-    if len(mel_chunks) >= len(imgs):
-        mel_batch = mel_chunks[:len(imgs)]
-        del mel_chunks[:len(imgs)]
-    else:
-        mel_batch = mel_chunks
-        imgs = imgs[:len(mel_chunks)]
-        full_frames = full_frames[:len(mel_chunks)]
-        lm = lm[:len(mel_chunks)]
-
     imgs_enhanced = []
-    for idx in tqdm(range(len(imgs)), desc='[Step 5] Reference Enhancement'):
+    for idx in tqdm(range(len(imgs)), desc='[Step 4] Reference Enhancement'):
         img = imgs[idx]
         try:
             pred, _, _ = enhancer.process(img, img, face_enhance=True, possion_blending=False)
             imgs_enhanced.append(pred)
         except UnboundLocalError:
             #no face
+            print('frames has no face')
             imgs_enhanced.append(img)
-    print(len(mel_chunks), len(imgs_enhanced), len(mel_batch), len(full_frames))
-    gen = datagen(imgs_enhanced.copy(), mel_batch, full_frames, None, (oy1,oy2,ox1,ox2))
 
     if args.up_face != 'original':
         instance = GANimationModel()
         instance.initialize()
         instance.setup()
 
+    gen = datagen(imgs_enhanced.copy(), mel_chunks, full_frames, None, (oy1,oy2,ox1,ox2))
+
     #ii = 0
-    kp_extractor = KeypointExtractor()
-    for i, (img_batch, mel_batch, frames, coords, img_original, f_frames) in enumerate(tqdm(gen, desc='[Step 6] Lip Synthesis:', total=int(np.ceil(float(len(mel_chunks)) / args.LNet_batch_size)))):
+    for i, (img_batch, mel_batch, frames, coords, img_original, f_frames) in enumerate(tqdm(gen, desc='[Step 5] Lip Synthesis:', total=int(np.ceil(float(len(mel_chunks)) / args.LNet_batch_size)))):
         img_batch = torch.FloatTensor(np.transpose(img_batch, (0, 3, 1, 2))).to(device)
         mel_batch = torch.FloatTensor(np.transpose(mel_batch, (0, 3, 1, 2))).to(device)
         img_original = torch.FloatTensor(np.transpose(img_original, (0, 3, 1, 2))).to(device)/255. # BGR -> RGB
@@ -330,8 +370,7 @@ def lipsync(out, args, device, fps, mel_chunks, full_frames):
                     out.write(xf)
                 #ii += 1
 
-
-def frameread(args, video_stream):
+def read_frames(video_stream, frame_size):
     full_frames = []
     while True:
         still_reading, frame = video_stream.read()
@@ -342,11 +381,9 @@ def frameread(args, video_stream):
         if y2 == -1: y2 = frame.shape[0]
         frame = frame[y1:y2, x1:x2]
         full_frames.append(frame)
-        if len(full_frames) >= args.frame_batch_size:
-            yield full_frames
-            full_frames = []
-    if len(full_frames) > 0:
-        yield full_frames
+        if len(full_frames) >= frame_size:
+            return full_frames
+    return full_frames
 
 # frames:256x256, full_frames: original size
 def datagen(frames, mels, full_frames, frames_pil, cox):
